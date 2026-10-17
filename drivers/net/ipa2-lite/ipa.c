@@ -7,6 +7,7 @@
 #include <linux/etherdevice.h>
 #include <linux/if_arp.h>
 #include <linux/if_rmnet.h>
+#include <linux/interconnect.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -39,6 +40,31 @@ module_param(test_mode, bool, 0644);
 
 static bool dump;
 module_param(dump, bool, 0644);
+
+static unsigned int clk_rate_active = 40000000;
+module_param(clk_rate_active, uint, 0644);
+MODULE_PARM_DESC(clk_rate_active, "IPA core clock rate in Hz while in use");
+
+static unsigned int clk_rate_idle = 9600000;
+module_param(clk_rate_idle, uint, 0644);
+MODULE_PARM_DESC(clk_rate_idle, "IPA core clock rate in Hz while runtime suspended");
+
+/*
+ * Interconnect votes in kBps: { idle, active }. Values follow the downstream
+ * msm-bus vectors for IPA v2.6L (SVS and NOMINAL cases). A path is only
+ * used if it is described in the device tree.
+ */
+struct ipa_icc_vote {
+	u32 avg, peak;
+};
+
+static const struct ipa_icc_vote ipa_icc_mem_votes[2] = {
+	{ 80000, 640000 }, { 206000, 960000 },
+};
+
+static const struct ipa_icc_vote ipa_icc_cfg_votes[2] = {
+	{ 80000, 80000 }, { 206000, 160000 },
+};
 
 union ipa_cmd {
 	struct ipa_hw_imm_cmd_dma_shared_mem dma_smem;
@@ -83,6 +109,7 @@ struct ipa {
 	atomic_t uc_cmd_busy;
 	bool test_mode;
 	struct clk *clk;
+	struct icc_path *icc_mem, *icc_cfg;
 	struct device *dev;
 	struct ipa_ep ep[EP_NUM];
 	struct ipa_partition layout[MEM_END + 1];
@@ -94,6 +121,7 @@ struct ipa {
 	u32 version, smem_size, smem_restr_bytes;
 	void *ssr_cookie;
 	void __iomem *mmio;
+	resource_size_t mmio_size;
 	struct ipa_dma_obj system_hdr;
 };
 
@@ -164,6 +192,19 @@ static int devm_ipa_dma_alloc(struct ipa *ipa, struct ipa_dma_obj *obj, u32 size
 		ret = devm_add_action_or_reset(ipa->dev, action_ipa_dma_free, obj);
 
 	return ret;
+}
+
+static int ipa_icc_set(struct ipa *ipa, bool active)
+{
+	const struct ipa_icc_vote *mem = &ipa_icc_mem_votes[active];
+	const struct ipa_icc_vote *cfg = &ipa_icc_cfg_votes[active];
+	int ret;
+
+	ret = icc_set_bw(ipa->icc_mem, mem->avg, mem->peak);
+	if (ret)
+		return ret;
+
+	return icc_set_bw(ipa->icc_cfg, cfg->avg, cfg->peak);
 }
 
 static void ipa_reset_hw(struct ipa *ipa)
@@ -461,6 +502,13 @@ static int ipa_partition_mem(struct ipa *ipa)
 	if (WARN_ON(ipa->smem_restr_bytes > ipa->smem_size ||
 		    (ipa->smem_restr_bytes & 3) || ipa->smem_size & 3))
 		return -EINVAL;
+
+	/* SRAM is accessed directly through the register window */
+	if (REG_IPA_SRAM_SW_FIRST_v2_5 + ipa->smem_size > ipa->mmio_size) {
+		dev_err(ipa->dev, "SRAM (%u bytes) exceeds register window (%pa)\n",
+			ipa->smem_size, &ipa->mmio_size);
+		return -EINVAL;
+	}
 
 	ipa->smem_size -= ipa->smem_restr_bytes;
 	offset = 0x280;
@@ -1118,6 +1166,7 @@ static int ipa_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	const char *name = "rmnet_ipa0";
+	struct resource *res;
 	struct ipa *ipa;
 	int ep, ret;
 
@@ -1134,16 +1183,32 @@ static int ipa_probe(struct platform_device *pdev)
 	init_waitqueue_head(&ipa->uc_cmd_wq);
 	platform_set_drvdata(pdev, ipa);
 
-	ipa->mmio = devm_platform_ioremap_resource(pdev, 0);
+	ipa->mmio = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR_OR_NULL(ipa->mmio))
 		return PTR_ERR(ipa->mmio) ?: -ENOMEM;
+
+	ipa->mmio_size = resource_size(res);
+
+	ipa->icc_mem = devm_of_icc_get(dev, "ipa-mem");
+	if (IS_ERR(ipa->icc_mem))
+		return dev_err_probe(dev, PTR_ERR(ipa->icc_mem),
+				     "failed to get ipa-mem interconnect\n");
+
+	ipa->icc_cfg = devm_of_icc_get(dev, "cpu-cfg");
+	if (IS_ERR(ipa->icc_cfg))
+		return dev_err_probe(dev, PTR_ERR(ipa->icc_cfg),
+				     "failed to get cpu-cfg interconnect\n");
+
+	ret = ipa_icc_set(ipa, true);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to vote interconnects\n");
 
 	ipa->clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(ipa->clk))
 		return dev_err_probe(dev, PTR_ERR(ipa->clk),
 				     "failed to get clock\n");
 
-	clk_set_rate(ipa->clk, 40000000);
+	clk_set_rate(ipa->clk, clk_rate_active);
 
 	dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 
@@ -1259,8 +1324,13 @@ static void ipa_remove(struct platform_device *pdev)
 static int ipa_runtime_resume(struct device *dev)
 {
 	struct ipa *ipa = dev_get_drvdata(dev);
+	int ret;
 
-	clk_set_rate(ipa->clk, 40000000);
+	ret = ipa_icc_set(ipa, true);
+	if (ret)
+		return ret;
+
+	clk_set_rate(ipa->clk, clk_rate_active);
 
 	return 0;
 }
@@ -1269,9 +1339,10 @@ static int ipa_runtime_suspend(struct device *dev)
 {
 	struct ipa *ipa = dev_get_drvdata(dev);
 
-	clk_set_rate(ipa->clk, 9600000);
+	clk_set_rate(ipa->clk, clk_rate_idle);
 
-	return 0;
+	/* The modem keeps using IPA, so only lower the votes */
+	return ipa_icc_set(ipa, false);
 }
 
 static int ipa_system_resume(struct device *dev)

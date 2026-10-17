@@ -2058,6 +2058,34 @@
 			};
 		};
 
+		/*
+		 * IPA v2.6L. One window covers the BAM (+0x4000), the IPA
+		 * registers (+0x40000) and the shared SRAM (+0x45000), as
+		 * the downstream "ipa-base" region does.
+		 */
+		ipa: ipa@14780000 {
+			compatible = "qcom,sdm660-ipa", "qcom,ipa-lite-v2.6";
+			reg = <0x14780000 0x4f000>;
+
+			clocks = <&rpmcc RPM_SMD_IPA_CLK>;
+
+			interrupts = <GIC_SPI 333 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 432 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "ipa", "dma";
+
+			interconnects = <&a2noc MASTER_IPA &bimc SLAVE_EBI>,
+					<&gnoc MASTER_APSS_PROC &snoc SLAVE_IPA>;
+			interconnect-names = "ipa-mem", "cpu-cfg";
+
+			/* AP and microcontroller stream IDs */
+			iommus = <&anoc2_smmu 0x19c0>,
+				 <&anoc2_smmu 0x19c2>;
+
+			modem-remoteproc = <&remoteproc_mss>;
+
+			status = "disabled";
+		};
+
 		camss: camss@ca00020 {
 			compatible = "qcom,sdm660-camss";
 			reg = <0x0ca00020 0x10>,

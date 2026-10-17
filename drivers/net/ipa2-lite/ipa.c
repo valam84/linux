@@ -730,6 +730,7 @@ static irqreturn_t ipa_isr_thread(int irq, void *data)
 		val = ioread32(ipa->mmio + REG_IPA_UC_RESP);
 		val &= IPA_UC_RESP_OP_MASK;
 		if (ipa->qmi && val == IPA_UC_RESPONSE_INIT_COMPLETED) {
+			dev_info(ipa->dev, "microcontroller initialized\n");
 			ipa_qmi_uc_loaded(ipa->qmi);
 			ipa->smem_uc_loaded[0] = 0x10ADEDFF;
 		} else if (ipa->qmi && val == IPA_UC_RESPONSE_CMD_COMPLETED) {
@@ -1228,7 +1229,13 @@ static int ipa_probe(struct platform_device *pdev)
 
 	ret = ipa_init_sram(ipa);
 	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret, "failed to initialize SRAM\n");
+
+	/* Getting here means immediate commands went through the BAM */
+	dev_info(dev, "IPA version %#x (hw %#x), BAM revision %#x, %u bytes SRAM\n",
+		 ioread32(ipa->mmio + REG_IPA_VERSION_OFST),
+		 ioread32(ipa->mmio + REG_IPA_COMP_HW_VERSION_OFST),
+		 ioread32(ipa->mmio + REG_BAM_REVISION), ipa->smem_size);
 
 	rmw32(ipa->mmio + REG_IPA_IRQ_EN_EE0, BIT(IPA_IRQ_UC_IRQ_1), BIT(IPA_IRQ_UC_IRQ_1));
 

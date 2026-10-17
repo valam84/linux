@@ -1038,6 +1038,7 @@ static void ipa_qmi_ready(struct ipa_qmi *ipa_qmi)
 		ipa_qmi->initial_boot = false;
 	}
 
+	dev_info(ipa_qmi->dev, "modem handshake complete, data path enabled\n");
 	ipa_modem_set_present(ipa_qmi->dev, true);
 }
 
@@ -1211,6 +1212,8 @@ static void ipa_client_init_driver_work(struct work_struct *work)
 	}
 
 	if (!ret) {
+		dev_info(dev, "modem accepted INIT_DRIVER (skip_uc_load=%u)\n",
+			 req.skip_uc_load);
 		ipa_qmi->modem_ready = true;
 		ipa_qmi_ready(ipa_qmi);		/* We might be ready now */
 	} else {
@@ -1234,6 +1237,8 @@ ipa_client_new_server(struct qmi_handle *qmi, struct qmi_service *svc)
 	ipa_qmi->modem_sq.sq_node = svc->node;
 	ipa_qmi->modem_sq.sq_port = svc->port;
 
+	dev_info(ipa_qmi->dev, "modem IPA QMI service found (node %u port %u)\n",
+		 svc->node, svc->port);
 	schedule_work(&ipa_qmi->init_driver_work);
 
 	return 0;

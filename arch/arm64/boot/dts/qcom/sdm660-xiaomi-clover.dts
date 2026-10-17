@@ -10,6 +10,10 @@
 	compatible = "xiaomi,clover-lte", "qcom,sdm660";
 };
 
+&ipa {
+	status = "okay";
+};
+
 &remoteproc_mss {
 	firmware-name = "mba.mbn", "modem.mdt";
 

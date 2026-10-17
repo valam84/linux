@@ -134,8 +134,9 @@ static inline void rmw32(void __iomem *reg, u32 mask, u32 val)
 
 static void ipa_dma_free(struct ipa_dma_obj *obj)
 {
+	/* ipa_dma_alloc() over-allocates by 8 bytes, free the same amount */
 	if (obj->size)
-		dma_free_coherent(obj->dev, obj->size, obj->virt, obj->addr);
+		dma_free_coherent(obj->dev, obj->size + 8, obj->virt, obj->addr);
 	obj->size = 0;
 }
 
@@ -334,10 +335,13 @@ ipa_submit_sync(struct ipa_ep *ep, struct fifo_desc *descs, int num_descs)
 {
 	int timeout = 100;
 	u32 idx, end_idx;
+	int ret;
 
-	idx = ipa_enqueue_descs(ep, descs, num_descs, NULL);
-	if (idx < 0)
-		return idx;
+	ret = ipa_enqueue_descs(ep, descs, num_descs, NULL);
+	if (ret < 0)
+		return ret;
+
+	idx = ret;
 
 	while (idx != ep->head && --timeout > 0)
 		usleep_range(200, 300);
@@ -917,17 +921,15 @@ static int ipa_ndev_open(struct net_device *ndev)
 	int ret = 0;
 
 	if (!ipa_ndev->rx->skbs) {
-		ipa_ndev->rx->skbs = devm_kzalloc(ipa->dev,
-				sizeof(struct sk_buff) * IPA_FIFO_NUM_DESC,
-				GFP_KERNEL);
+		ipa_ndev->rx->skbs = devm_kcalloc(ipa->dev, IPA_FIFO_NUM_DESC,
+				sizeof(*ipa_ndev->rx->skbs), GFP_KERNEL);
 		if (!ipa_ndev->rx->skbs)
 			return -ENOMEM;
 	}
 
 	if (ipa_ndev->tx && !ipa_ndev->tx->skbs) {
-		ipa_ndev->tx->skbs = devm_kzalloc(ipa->dev,
-				sizeof(struct sk_buff) * IPA_FIFO_NUM_DESC,
-				GFP_KERNEL);
+		ipa_ndev->tx->skbs = devm_kcalloc(ipa->dev, IPA_FIFO_NUM_DESC,
+				sizeof(*ipa_ndev->tx->skbs), GFP_KERNEL);
 
 		if (!ipa_ndev->tx->skbs)
 			return -ENOMEM;

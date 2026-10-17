@@ -49,6 +49,11 @@ static unsigned int clk_rate_idle = 9600000;
 module_param(clk_rate_idle, uint, 0644);
 MODULE_PARM_DESC(clk_rate_idle, "IPA core clock rate in Hz while runtime suspended");
 
+/* Downstream ipa_init_hw() writes 0x11 on every IPA v2.x; this driver used 1 */
+static unsigned int comp_cfg = 0x11;
+module_param(comp_cfg, uint, 0444);
+MODULE_PARM_DESC(comp_cfg, "Value written to IPA_COMP_CFG at reset");
+
 /*
  * Interconnect votes in kBps: { idle, active }. Values follow the downstream
  * msm-bus vectors for IPA v2.6L (SVS and NOMINAL cases). A path is only
@@ -207,11 +212,18 @@ static int ipa_icc_set(struct ipa *ipa, bool active)
 	return icc_set_bw(ipa->icc_cfg, cfg->avg, cfg->peak);
 }
 
-static void ipa_reset_hw(struct ipa *ipa)
+static int ipa_reset_hw(struct ipa *ipa)
 {
 	iowrite32(1, ipa->mmio + REG_IPA_COMP_SW_RESET_OFST);
 	iowrite32(0, ipa->mmio + REG_IPA_COMP_SW_RESET_OFST);
-	iowrite32(1, ipa->mmio + REG_IPA_COMP_CFG_OFST);
+	iowrite32(comp_cfg, ipa->mmio + REG_IPA_COMP_CFG_OFST);
+
+	/* Same sanity check as downstream: registers must be readable */
+	if (!ioread32(ipa->mmio + REG_IPA_VERSION_OFST)) {
+		dev_err(ipa->dev, "IPA_VERSION reads as 0, no register access\n");
+		return -EFAULT;
+	}
+
 	if (ipa->version >= 25)
 		iowrite32(0x1fff7f, ipa->mmio + REG_IPA_BCR_OFST);
 
@@ -224,6 +236,8 @@ static void ipa_reset_hw(struct ipa *ipa)
 
 	iowrite32(BAM_ERROR_EN | BAM_HRESP_ERR_EN, ipa->mmio + REG_BAM_IRQ_EN);
 	iowrite32(BAM_IRQ, ipa->mmio + REG_BAM_IRQ_SRCS_MSK_EE0);
+
+	return 0;
 }
 
 static inline u32 ipa_fifo_offset(void __iomem *reg)
@@ -1219,7 +1233,9 @@ static int ipa_probe(struct platform_device *pdev)
 
 	dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 
-	ipa_reset_hw(ipa);
+	ret = ipa_reset_hw(ipa);
+	if (ret)
+		return ret;
 
 	ret = ipa_partition_mem(ipa);
 	if (ret)
